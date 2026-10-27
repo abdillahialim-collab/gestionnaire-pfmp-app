@@ -600,7 +600,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 </script>
 <script>/* ===== Gestionnaire PFMP — noyau : état, utilitaires, calculs ===== */
 'use strict';
-const APP_VERSION = '3.1';
+const APP_VERSION = '3.2';
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1382,12 +1382,19 @@ const cleanName = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim().to
 const canonClass = s => norm(String(s || '').replace(/\([^)]*\)/g, ' ')).replace(/\bbac pro(fessionnel)?\b/g, 'bp').replace(/\bterminale\b/g, 'tle').replace(/\bpremiere\b/g, '1ere').replace(/\b(\d) ?(ere|eme|e|ieme)\b/g, '$1$2').replace(/\b1ere\b/g, '1ere').replace(/\bannee\b/g, ' ').replace(/\s+/g, ' ').trim();
 const classToks = s => canonClass(s).split(' ').filter(t => t && !/^\d+$/.test(t));
 /* Retourne la classe du référentiel correspondant au texte saisi, si tous les candidats pointent vers la même période. */
+const CLASS_LEVELS = ['1ere', '2eme', '3eme', 'tle', 'bts', 'cap', 'bp'];
+const classAcro = s => classToks(s).filter(w => w.length > 1 && !CLASS_LEVELS.includes(w) && !['de', 'des', 'du', 'la', 'le', 'et', 'en', 'opt', 'option'].includes(w)).map(w => w[0]).join('');
 function classMatch(etabId, text) {
   const t = classToks(text); if (!t.length) return null;
   const cs = S.classes.filter(c => c.etab === eCode(etabId) && c.periode);
   const full = canonClass(text);
   let cand = cs.filter(c => canonClass(c.niveau + ' ' + c.classe) === full || canonClass(c.classe) === full);
   if (!cand.length) cand = cs.filter(c => { const k = classToks(c.niveau + ' ' + c.classe); return t.every(x => k.includes(x)) || k.every(x => t.includes(x)); });
+  if (!cand.length) {
+    /* Sigle : « 2ème année CAP EVS » ↔ « 2ème CAP Employés de Vtes Spéc Opt B » (même niveau exigé) */
+    const lv = t.filter(w => CLASS_LEVELS.includes(w));
+    cand = cs.filter(c => { const a = classAcro(c.classe), k = classToks(c.niveau + ' ' + c.classe); return a.length >= 2 && t.includes(a) && lv.every(x => k.includes(x)); });
+  }
   if (!cand.length) return null;
   return cand.every(c => c.periode === cand[0].periode) ? cand[0] : null;
 }
@@ -1410,9 +1417,24 @@ async function readTables(file, fields) {
     if (hi < 0) return;
     const header = rows[hi].map(h => txt(h));
     const recs = rows.slice(hi + 1).map((r, j) => { const o = {}; header.forEach((h, i) => { if (h) o[h] = r[i]; }); o.__row = r.__rowNum__ != null ? r.__rowNum__ + 1 : hi + j + 2; return o; });
-    tables.push({ sheet: sn, header, recs });
+    tables.push({ sheet: sn, header, recs, ctx: sheetContext(rows.slice(0, hi)) });
   });
   return tables;
+}
+/* En-tête du modèle des établissements :
+   LYCEE TECHNIQUE DE GABODE / E-Mail / Tél / DJIBOUTI / Année scolaire / LISTE DES ELEVES DE LA CLASSE / 2ème ANNÉE CAP EVS */
+function sheetContext(rows) {
+  const lines = rows.map(r => r.map(txt).filter(Boolean).join(' ')).filter(Boolean), ctx = { etab: '', classe: '' };
+  const isContact = l => /@|e-?mail|t[ée]l|\(\s*:|^\s*\d[\d .]+$|ann[ée]e scolaire|^djibouti$/i.test(l);
+  for (const l of lines) { if (isContact(l) || /liste des/i.test(norm(l))) continue; if (findEtab(l) || /lyc[ée]e|coll[èe]ge|centre|[ée]cole|institut|csfop|cfp|cfpa/i.test(l)) { ctx.etab = l; break; } }
+  const li = lines.findIndex(l => /liste des eleves|liste des stagiaires/.test(norm(l)));
+  if (li >= 0) {
+    const m = lines[li].match(/classe\s*:?\s*(.+)$/i);
+    ctx.classe = m && norm(m[1]) && !/^de la classe$/i.test(m[1]) ? txt(m[1]) : '';
+    if (!ctx.classe || /^(de la )?classe$/i.test(norm(ctx.classe))) ctx.classe = lines[li + 1] && !isContact(lines[li + 1]) ? lines[li + 1] : '';
+  }
+  if (!ctx.classe) { const c = lines.find(l => /^classe\s*:/i.test(l)); if (c) ctx.classe = txt(c.replace(/^classe\s*:/i, '')); }
+  return ctx;
 }
 function autoMap(fields, header) {
   const m = {}; const nh = header.map(norm);
@@ -1440,7 +1462,7 @@ function wizard(cfg, file) {
           const mp = {}; cfg.fields.forEach(f => { mp[f.k] = fd['m_' + f.k] || ''; });
           const canon = tables.map(t => {
             const loc = autoMap(cfg.fields, t.header);
-            return { sheet: t.sheet, recs: t.recs.map(r => { const o = { __row: r.__row, __sheet: t.sheet }; cfg.fields.forEach(f => { const h = t.header.includes(mp[f.k]) ? mp[f.k] : (mp[f.k] ? loc[f.k] : ''); o[f.k] = h ? r[h] : ''; }); return o; }) };
+            return { sheet: t.sheet, ctx: t.ctx, recs: t.recs.map(r => { const o = { __row: r.__row, __sheet: t.sheet }; cfg.fields.forEach(f => { const h = t.header.includes(mp[f.k]) ? mp[f.k] : (mp[f.k] ? loc[f.k] : ''); o[f.k] = h ? r[h] : ''; }); return o; }) };
           });
           result = cfg.parse(canon, mp, fd);
           $('#prev', m).innerHTML = result.html;
@@ -1456,6 +1478,7 @@ const noteList = (t, arr, max) => arr.length ? '<details open><summary>' + esc(t
 
 /* ---------- Import des élèves ---------- */
 const F_ELEVES = [
+  { k: 'num', label: 'N° (facultatif)', syn: ['n', 'no', 'num', 'numero', 'n d ordre', 'ordre'] },
   { k: 'nom', label: 'Nom et prénoms', req: true, syn: ['nom', 'noms', 'nom et prenom', 'nom et prenoms', 'nom prenom', 'nom prenoms', 'nom complet', 'eleve', 'eleves', 'stagiaire', 'nom du stagiaire', 'nom de l eleve', 'nom et prenom de l eleve', 'candidat'] },
   { k: 'etab', label: 'Établissement', syn: ['etablissement', 'ecole', 'lycee', 'centre', 'ets', 'etab', 'etablissement d origine'] },
   { k: 'classe', label: 'Classe / filière', syn: ['classe', 'filiere', 'specialite', 'section', 'formation', 'classe filiere', 'classes'] },
@@ -1505,14 +1528,20 @@ function elevesParse(tables, mp, fd) {
   const existing = new Map(); S.eleves.forEach(e => { const k = nameKey(e.nom); if (!existing.has(k)) existing.set(k, []); existing.get(k).push(e); });
   const add = [], upd = [], skip = [], check = [], noEtab = [], newEtab = new Map(), fileKeys = new Map(), rep = [], texts = [], pend = [];
   let noPer = 0;
-  tables.forEach(t => t.recs.forEach(r => {
+  const ctxs = [];
+  tables.forEach(t => {
+    const cx = t.ctx || {}, hasNum = t.recs.some(r => txt(r.num));
+    if (cx.etab || cx.classe) ctxs.push('<b>' + esc(t.sheet) + '</b> : ' + [cx.etab ? 'établissement « ' + esc(cx.etab) + ' »' + (findEtab(cx.etab) ? '' : ' (nouveau)') : '', cx.classe ? 'classe « ' + esc(cx.classe) + ' »' : ''].filter(Boolean).join(', '));
+    t.recs.forEach(r => {
     r.__sheet = r.__sheet || t.sheet;
     const raw = txt(r.nom), nom = cleanName(r.nom);
+    if (hasNum && !txt(r.num) && !txt(r.organisme)) { if (nom) rep.push({ niv: 'info', ligne: rowRef(r), col: 'N°', val: raw, msg: 'ligne sans numéro, hors de la liste : ignorée' }); return; }
+    if (!r.classe && !r.niveau && cx.classe) r.classe = cx.classe;
     if (!nom || nom.length < 3 || isHeaderWord(nom)) {
-      if (!isHeaderWord(nom) && [r.classe, r.etab, r.organisme].some(v => txt(v))) rep.push({ niv: 'err', ligne: rowRef(r), col: 'Nom et prénoms', val: raw, msg: 'nom vide ou trop court : ligne ignorée' });
+      if (!isHeaderWord(nom) && [r.classe, r.etab, r.organisme].some(v => txt(v)) && txt(r.nom)) rep.push({ niv: 'err', ligne: rowRef(r), col: 'Nom et prénoms', val: raw, msg: 'nom vide ou trop court : ligne ignorée' });
       return;
     }
-    let et = null; const etText = txt(r.etab);
+    let et = null; const etText = txt(r.etab) || (fd.defetab ? '' : cx.etab || '');
     if (etText) {
       et = findEtab(etText);
       if (!et) { const k = norm(etText); if (!newEtab.has(k)) newEtab.set(k, { id: uid('et'), code: etText.toUpperCase().slice(0, 14), nom: etText }); et = newEtab.get(k); rep.push({ niv: 'warn', ligne: rowRef(r), col: 'Établissement', val: etText, msg: 'établissement inconnu : il sera créé' }); }
@@ -1538,7 +1567,8 @@ function elevesParse(tables, mp, fd) {
     if (dup.length) { check.push(nom); rep.push({ niv: 'warn', ligne: rowRef(r), col: 'Nom et prénoms', val: nom, msg: 'homonyme déjà présent (' + dup.map(d => eCode(d.etabId) || (E(d.etabId) || {}).code || 'même fichier').join(', ') + ') : ajouté et signalé « doublon ? »' }); }
     if (!fileKeys.has(key)) fileKeys.set(key, []); fileKeys.get(key).push(rec);
     add.push(rec);
-  }));
+  });
+  });
   const vr = orgResolver(texts, fd);
   add.forEach(e => { if (e.orgTxt) { const id = vr.get(e.orgTxt); if (id) e.organismeId = id; } });
   pend.forEach(x => {
@@ -1552,6 +1582,7 @@ function elevesParse(tables, mp, fd) {
   return {
     ok: add.length + upd.length > 0, add, upd, newEtab: Array.from(newEtab.values()),
     html: prevBox([[add.length, 'élèves à ajouter', 'vert'], [complets, 'auront leur convention tout de suite', 'vert'], [aCompl, 'à compléter ensuite', aCompl ? 'ambre' : ''], [vr.nouveaux, 'organismes ajoutés au répertoire'], [upd.length, 'organismes mis à jour'], [skip.length, 'déjà présents (ignorés)'], [check.length, 'homonymes à vérifier', check.length ? 'ambre' : ''], [noEtab.length, 'sans établissement (ignorés)', noEtab.length ? 'rouge' : '']],
+      (ctxs.length ? '<p class="hint">Lu dans l’en-tête du fichier — ' + ctxs.join(' ; ') + '. Choisissez un établissement par défaut ci-dessus pour le remplacer.</p>' : '') +
       vr.html + reportHtml(rep) + '<p class="hint">La liste fait foi : à l’import, chaque élève qui a un organisme et une période est rattaché à la convention de son organisme pour sa période (créée si besoin).</p>')
   };
 }
@@ -1807,9 +1838,19 @@ function importClasses(file) {
 
 /* ---------- Modèles Excel ---------- */
 function downloadTemplate(k) {
-  if (k === 'eleves') xlsxDownload('Modele_import_eleves.xlsx', [
-    { name: 'Élèves', aoa: [['Nom et prénoms', 'Établissement', 'Niveau', 'Classe / filière', 'Organisme d’accueil'], ['EXEMPLE AHMED HASSAN', 'LTG', 'Tle', 'BAC PRO IRT', 'DATASYS SARL'], ['EXEMPLE FATOUMA ALI', 'LTG', 'Tle', 'BAC PRO IMSEC', '']], widths: [34, 16, 10, 28, 40] },
-    { name: 'Mode d’emploi', aoa: [['Une ligne par élève. Un fichier par établissement, ou tous les établissements dans la même feuille.'], ['Établissement : le code (LTG, LTAS, LHA, LIC…) ou le nom complet. Si la colonne est absente, l’établissement par défaut choisi à l’import est utilisé.'], ['Niveau et Classe : servent à retrouver automatiquement la période de stage.'], ['Organisme d’accueil : l’organisme où l’établissement place l’élève. La liste fait foi : la convention est préparée automatiquement. Un nom mal écrit est rapproché du répertoire ; un organisme absent peut y être ajouté.'], ['Les doublons sont détectés automatiquement à l’import. Réimporter le même fichier ne crée pas de doublon.']], widths: [120] }]);
+  if (k === 'eleves') {
+    /* Modèle des établissements : en-tête de l'établissement et de la classe, puis N° / NOMS / ENTREPRISE. */
+    const aoa = [['NOM DE L’ÉTABLISSEMENT (ex. LYCEE TECHNIQUE DE GABODE)'], ['E-Mail : '], ['Tél : '], ['DJIBOUTI'], ['', '', 'Année scolaire ' + S.settings.annee], [], ['LISTE DES ELEVES DE LA CLASSE'], ['CLASSE (ex. 2ème ANNÉE CAP EVS)'], [], ['N°', 'NOMS', 'ENTREPRISE']];
+    for (let i = 1; i <= 40; i++) aoa.push([i, '', '']);
+    const wb = XLSX.utils.book_new(), ws = XLSX.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 7 }, { wch: 38 }, { wch: 32 }];
+    ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } }, { s: { r: 1, c: 0 }, e: { r: 1, c: 1 } }, { s: { r: 2, c: 0 }, e: { r: 2, c: 1 } }, { s: { r: 3, c: 0 }, e: { r: 3, c: 1 } }, { s: { r: 6, c: 0 }, e: { r: 6, c: 2 } }, { s: { r: 7, c: 0 }, e: { r: 7, c: 2 } }];
+    XLSX.utils.book_append_sheet(wb, ws, 'Classe');
+    const help = XLSX.utils.aoa_to_sheet([['Une feuille par classe (vous pouvez mettre plusieurs classes dans le même fichier, une par feuille).'], ['Ligne 1 : le nom de l’établissement. Ligne 8 : le nom de la classe. Ils servent à retrouver l’établissement et la période de stage.'], ['NOMS : nom et prénoms de l’élève. ENTREPRISE : l’organisme d’accueil. La liste fait foi : la convention est préparée automatiquement.'], ['Une entreprise absente du répertoire peut y être ajoutée à l’import ; un nom mal écrit est rapproché d’un organisme existant.'], ['Un élève sans entreprise reste « à compléter ». Réimporter la même liste ne crée pas de doublon.']]);
+    help['!cols'] = [{ wch: 120 }];
+    XLSX.utils.book_append_sheet(wb, help, 'Mode d’emploi');
+    saveBlob(new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })]), 'Modele_liste_eleves_classe.xlsx');
+  }
   if (k === 'org') xlsxDownload('Modele_import_partenaires.xlsx', [
     { name: 'Partenaires', aoa: [['Organisme', 'Domaine d’activité', 'Adresse', 'Téléphone', 'Boîte postale', 'E-mail', 'Représentant', 'Qualité du représentant', 'Filières acceptées'], ['EXEMPLE HÔTEL', 'Hôtellerie-Restauration', 'Plateau du Serpent', '21 00 00 00', '', 'contact@exemple.dj', '', '', 'Cuisine ; Restaurant']], widths: [34, 26, 28, 18, 14, 26, 24, 26, 28] },
     { name: 'Mode d’emploi', aoa: [['Une ligne par organisme d’accueil. Ces informations sont reprises sur les conventions.'], ['Si l’organisme existe déjà dans l’application (même nom ou nom très proche), ses informations sont mises à jour sans effacer les données déjà saisies.'], ['Seule la colonne Organisme est obligatoire ; les autres sont facultatives.']], widths: [120] }]);
