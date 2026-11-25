@@ -178,6 +178,10 @@ input:hover,select:hover,textarea:hover{border-color:var(--pri-line)}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--pri);box-shadow:0 0 0 4px color-mix(in srgb,var(--pri) 16%,transparent)}
 select:disabled{opacity:.6}
 textarea{width:100%;resize:vertical;line-height:1.5}
+.filters{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 12px 4px;margin-bottom:12px}
+.filters .bar select{flex:1 1 170px;max-width:none}
+.bar input.narrow{flex:0 1 220px;min-width:160px}
+small.hit{color:var(--pri);font-weight:600}
 .count{margin:4px 0 8px;color:var(--mut);font:500 12.5px var(--f-num);letter-spacing:.03em}
 
 /* ---------- Tableaux ---------- */
@@ -600,7 +604,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 </script>
 <script>/* ===== Gestionnaire PFMP — noyau : état, utilitaires, calculs ===== */
 'use strict';
-const APP_VERSION = '3.3';
+const APP_VERSION = '4.0';
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -634,13 +638,13 @@ const SIGNEES = ['retournee'];
 let MODE = 'real';
 try { MODE = localStorage.getItem('pfmp_mode') === 'demo' ? 'demo' : 'real'; } catch (e) { }
 const storeKey = () => MODE === 'demo' ? 'pfmp_demo_v1' : 'pfmp_real_v1';
-let S = null, MEM = {};
+let S = null, MEM = {}, UPGRADE = null;
 function lsGet(k) { try { return localStorage.getItem(k); } catch (e) { return MEM[k] || null; } }
 function lsSet(k, v) { try { localStorage.setItem(k, v); return true; } catch (e) { MEM[k] = v; return false; } }
 
 function freshState() {
   return {
-    v: 3,
+    v: 4,
     settings: {
       annee: '2026-2027', relanceJours: 7,
       dgfp: { nom: 'M. YASSER ALI ABDOU', qualite: 'Chef de Service de Partenariat Public-Privé' },
@@ -658,6 +662,13 @@ function loadState() {
       S = JSON.parse(t);
       /* Passage à la version 3 : une copie des données d'avant est gardée dans le navigateur, au cas où. */
       if ((S.v || 1) < 3) { lsSet(storeKey() + '_avant_v3', t); S.v = 3; }
+      /* Passage à la version 4 (conventions par établissement) : copie de sécurité des données telles qu'elles étaient. */
+      if ((S.v || 1) < 4) {
+        try { localStorage.removeItem(storeKey() + '_avant_v3'); } catch (e) { }
+        lsSet(storeKey() + '_avant_v4', t); S.v = 4;
+        const before = S.conventions.length; migrate(); UPGRADE = { avant: before, apres: S.conventions.length, eleves: S.eleves.length };
+        return;
+      }
       migrate(); return;
     } catch (e) { }
   }
@@ -869,16 +880,18 @@ function detachConv(e) {
   if (convStatut(c).k === 'generee') c.aRegenerer = true;
   else if (convStatut(c).k === 'a_generer' && !elevesOf(c.id).length) dropConv(c);
 }
-/* Rattache chaque élève complet (organisme + période) à la convention ouverte de son organisme et de sa période, ou en crée une. */
+/* Rattache chaque élève complet (organisme + période) à la convention ouverte de son établissement, de son organisme et de sa période,
+   ou en crée une. Version 4 : une convention par établissement (les élèves de deux écoles ne partagent plus une convention). */
+const sameConv = (x, e) => x.organismeId === e.organismeId && x.periodeId === e.periodeId && (x.etabId || '') === (e.etabId || '');
 function syncConvs(list) {
   let created = 0, added = 0;
   (list || S.eleves).forEach(e => {
     if (!e || !e.organismeId || !e.periodeId || e.conventionId) return;
     if (!O(e.organismeId) || !P(e.periodeId)) return;
-    let c = S.conventions.find(x => x.organismeId === e.organismeId && x.periodeId === e.periodeId && convOpen(x));
+    let c = S.conventions.find(x => sameConv(x, e) && convOpen(x));
     if (!c) {
       const p = P(e.periodeId);
-      c = { id: uid('cv'), ref: nextRef(), organismeId: e.organismeId, periodeId: e.periodeId, debut: p.debut, fin: p.fin, semaines: p.semaines, rep: '', qualite: '', notes: '', cree: todayISO(), hist: [{ k: 'a_generer', d: todayISO() }] };
+      c = { id: uid('cv'), ref: nextRef(), etabId: e.etabId || '', organismeId: e.organismeId, periodeId: e.periodeId, debut: p.debut, fin: p.fin, semaines: p.semaines, rep: '', qualite: '', notes: '', cree: todayISO(), hist: [{ k: 'a_generer', d: todayISO() }] };
       S.conventions.push(c); created++;
     } else if (convStatut(c).k === 'generee') c.aRegenerer = true;
     e.conventionId = c.id; added++;
@@ -971,12 +984,32 @@ function migrate() {
     delete e.voeuId; delete e.voeuTxt; delete e.aff;
   });
   S.seqEleve = n;
+  splitParEtab();
   syncConvs();
+}
+/* Passage à la version 4 : les conventions qui mélangeaient plusieurs établissements sont séparées.
+   - convention encore modifiable (à générer, générée) : elle garde l'établissement le plus nombreux, les autres élèves
+     reçoivent leur propre convention (une générée est signalée « à régénérer ») ;
+   - convention déjà imprimée, signée ou en circuit : conservée telle quelle (document papier en cours), marquée multi-établissements.
+   Sans effet sur des données déjà passées en version 4. */
+function splitParEtab() {
+  let moved = 0;
+  S.conventions.forEach(c => {
+    if (c.etabId !== undefined) return;
+    const els = elevesOf(c.id), ets = Array.from(new Set(els.map(e => e.etabId || '')));
+    if (ets.length <= 1) { c.etabId = ets[0] || ''; return; }
+    if (!convOpen(c)) { c.etabId = ''; c.multiEtab = true; return; }
+    const groups = ets.map(x => [x, els.filter(e => (e.etabId || '') === x)]).sort((a, b) => b[1].length - a[1].length);
+    c.etabId = groups[0][0];
+    groups.slice(1).forEach(([, g]) => g.forEach(e => { e.conventionId = ''; moved++; }));
+    if (convStatut(c).k === 'generee') c.aRegenerer = true;
+  });
+  return moved;
 }
 const nextOrdre = () => (S.seqEleve = (S.seqEleve || 0) + 1);
 </script>
 <script>/* ===== Gestionnaire PFMP — interface ===== */
-const UI = { view: 'accueil', f: { eleves: { q: '', etab: '', per: '', aff: '', lim: 150 }, org: { q: '', cap: '', lim: 150 }, conv: { q: '', st: '', per: '', lim: 150 }, ref: { tab: 'periodes', q: '' } }, sel: { eleves: new Set(), conv: new Set(), suivi: new Set() }, bilan: { periode: '', etab: '' } };
+const UI = { view: 'accueil', f: { eleves: { q: '', etab: '', per: '', aff: '', lim: 150 }, org: { q: '', cap: '', lim: 150 }, conv: { q: '', el: '', st: '', per: '', etab: '', cl: '', org: '', lim: 150 }, ref: { tab: 'periodes', q: '' } }, sel: { eleves: new Set(), conv: new Set(), suivi: new Set() }, bilan: { periode: '', etab: '' } };
 /* Parcours guidé : les étapes numérotées suivent l'ordre du travail. */
 const NAV = [
   ['accueil', 'Tableau de bord'],
@@ -1188,45 +1221,79 @@ function fillOrgs() {
 }
 
 /* ===== Conventions ===== */
+/* Filtres : recherche libre, élève, établissement, classe / filière, organisme d'accueil, période, statut. */
+const CONV_F0 = { q: '', el: '', st: '', per: '', etab: '', cl: '', org: '' };
 function filteredConvs(base) {
-  const f = UI.f.conv, q = norm(f.q);
+  const f = UI.f.conv, q = norm(f.q), qe = norm(f.el);
   return (base || S.conventions).filter(c => {
-    if (q && !norm(c.ref + ' ' + oName(c.organismeId) + ' ' + pName(c.periodeId)).includes(q)) return false;
-    if (f.st && convStatut(c).k !== f.st) return false;
+    const els = elevesOf(c.id);
+    if (f.etab && c.etabId !== f.etab && !(c.multiEtab && els.some(e => e.etabId === f.etab))) return false;
+    if (f.org && c.organismeId !== f.org) return false;
     if (f.per && c.periodeId !== f.per) return false;
+    if (f.st === 'regen') { if (!c.aRegenerer) return false; } else if (f.st && convStatut(c).k !== f.st) return false;
+    if (f.cl && !els.some(e => norm(e.classe) === f.cl)) return false;
+    if (qe && !els.some(e => norm(e.nom).includes(qe))) return false;
+    if (q && !norm([c.ref, oName(c.organismeId), pName(c.periodeId), eCode(c.etabId), eName(c.etabId), c.notes].concat(els.map(e => e.nom + ' ' + e.classe)).join(' ')).includes(q)) return false;
     return true;
-  }).sort((a, b) => collator.compare(oName(a.organismeId), oName(b.organismeId)) || (a.debut || '').localeCompare(b.debut || ''));
+  }).sort((a, b) => collator.compare(eCode(a.etabId), eCode(b.etabId)) || collator.compare(oName(a.organismeId), oName(b.organismeId)) || (a.debut || '').localeCompare(b.debut || ''));
 }
 function convRows(list, selKey, withActions) {
-  const sel = UI.sel[selKey];
-  return list.map(c => { const w = convWarn(c), n = elevesOf(c.id).length, h = convStatut(c);
+  const sel = UI.sel[selKey], qe = norm(UI.f.conv.el);
+  return list.map(c => { const w = convWarn(c), els = elevesOf(c.id), n = els.length, h = convStatut(c);
+    const cls = Array.from(new Set(els.map(e => e.classe).filter(Boolean)));
+    const hit = qe ? els.filter(e => norm(e.nom).includes(qe)).map(e => e.nom) : [];
     return '<tr class="' + (sel.has(c.id) ? 'sel' : '') + '"><td><input type="checkbox" data-sel="' + selKey + '" data-id="' + c.id + '"' + (sel.has(c.id) ? ' checked' : '') + '></td>' +
-      '<td>' + esc(c.ref) + '</td><td><b>' + esc(oName(c.organismeId)) + '</b></td><td>' + esc(pName(c.periodeId)) + '</td><td class="c">' + n + '</td>' +
+      '<td class="nw">' + esc(c.ref) + '</td><td>' + (c.etabId ? '<b title="' + esc(eName(c.etabId)) + '">' + esc(eCode(c.etabId)) + '</b>' : (c.multiEtab ? badge('plusieurs', 'gris') : '—')) + '<br><small class="muted">' + esc(cls.slice(0, 2).join(' · ') + (cls.length > 2 ? ' …' : '')) + '</small></td>' +
+      '<td><b>' + esc(oName(c.organismeId)) + '</b>' + (hit.length ? '<br><small class="hit">Élève : ' + esc(hit.slice(0, 3).join(', ') + (hit.length > 3 ? '…' : '')) + '</small>' : '') + '</td><td>' + esc(pName(c.periodeId)) + '</td><td class="c">' + n + '</td>' +
       '<td>' + fdate(c.debut) + ' → ' + fdate(c.fin) + '<br><small class="muted">' + (c.semaines ? c.semaines + ' sem.' : 'durée ?') + '</small></td>' +
       '<td>' + stBadge(c) + (c.aRegenerer ? ' ' + badge('à régénérer', 'ambre') : '') + '<br><small class="muted">depuis le ' + fdate(h.d) + (['imprimee', 'signee_dgfp', 'chez_org'].includes(h.k) ? ' (' + convJours(c) + ' j)' : '') + '</small></td>' +
       '<td>' + (w.length ? '<span class="warnic" title="' + esc(w.join('\n')) + '">⚠ ' + w.length + '</span>' : '<span class="okic">✓</span>') + '</td>' +
       '<td class="r nw"><button class="lnk" data-act="word-conv" data-id="' + c.id + '">Word</button> <button class="lnk" data-act="open-conv" data-id="' + c.id + '">Ouvrir</button></td></tr>'; });
 }
-const CONV_COLS = [{ h: '<input type="checkbox" id="all-cv">', w: '34px' }, { h: 'Réf.', w: '110px' }, { h: 'Organisme' }, { h: 'Période' }, { h: 'Stag.', w: '50px', cls: 'c' }, { h: 'Dates et durée', w: '170px' }, { h: 'Statut' }, { h: 'Contrôle', w: '70px' }, { h: '', w: '120px' }];
+const CONV_COLS = [{ h: '<input type="checkbox" id="all-cv">', w: '34px' }, { h: 'Réf.', w: '110px' }, { h: 'Établissement / classe', w: '170px' }, { h: 'Organisme d’accueil' }, { h: 'Période' }, { h: 'Stag.', w: '50px', cls: 'c' }, { h: 'Dates et durée', w: '160px' }, { h: 'Statut' }, { h: 'Contrôle', w: '70px' }, { h: '', w: '110px' }];
+function convFilterBar() {
+  const f = UI.f.conv, inConv = new Set(S.conventions.map(c => c.id));
+  const elsIn = S.eleves.filter(e => inConv.has(e.conventionId) && (!f.etab || e.etabId === f.etab));
+  const classes = Array.from(new Map(elsIn.filter(e => e.classe).map(e => [norm(e.classe), e.classe])).entries()).sort((a, b) => collator.compare(a[1], b[1]));
+  const etabs = S.etablissements.filter(x => S.conventions.some(c => c.etabId === x.id)).sort((a, b) => collator.compare(a.code, b.code));
+  const orgs = S.organismes.filter(o => S.conventions.some(c => c.organismeId === o.id)).sort(byName);
+  const n = Object.keys(CONV_F0).filter(k => f[k]).length;
+  return '<div class="filters"><div class="bar"><input type="search" id="q-cv" placeholder="Rechercher partout : référence, élève, organisme, classe…" value="' + esc(f.q) + '">' +
+    '<input type="search" id="q-el" class="narrow" placeholder="Nom d’un élève" value="' + esc(f.el) + '" aria-label="Filtrer par élève"></div>' +
+    '<div class="bar">' +
+    '<select id="fc-etab" aria-label="Établissement">' + opts(etabs.map(x => [x.id, x.code + ' — ' + x.nom]), f.etab, 'Tous les établissements') + '</select>' +
+    '<select id="fc-cl" aria-label="Classe ou filière">' + opts(classes, f.cl, 'Toutes les classes / filières') + '</select>' +
+    '<select id="fc-org" aria-label="Organisme d’accueil">' + opts(orgs.map(o => [o.id, o.nom]), f.org, 'Tous les organismes d’accueil') + '</select>' +
+    '<select id="fc-per" aria-label="Période">' + perOpts(f.per, 'Toutes les périodes') + '</select>' +
+    '<select id="fc-st" aria-label="Statut">' + opts(STATUTS.map(s => [s.k, s.l]).concat([['regen', 'À régénérer']]), f.st, 'Tous les statuts') + '</select>' +
+    (n ? '<button class="lnk" data-act="conv-reset">Effacer les filtres (' + n + ')</button>' : '') + '</div></div>';
+}
 VIEWS.conventions = {
   html() {
-    const f = UI.f.conv, nGroups = pendingGroups().length;
+    const nGroups = pendingGroups().length;
     const nGen = S.conventions.filter(c => elevesOf(c.id).length && (convStatut(c).k === 'a_generer' || c.aRegenerer)).length;
-    return pageHead('Conventions de stage', 'Étape 3 · Préparées automatiquement à partir de la liste des élèves : une convention par organisme et par période (découpage du modèle de la DGFP : un tableau des stagiaires par convention). La mise en forme du modèle Word est conservée à l’identique.',
+    return pageHead('Conventions de stage', 'Étape 3 · Préparées automatiquement à partir de la liste des élèves : une convention par établissement, par organisme d’accueil et par période. La mise en forme du modèle Word de la DGFP est conservée à l’identique.',
       '<button class="btn" data-act="exp-conv">Exporter la liste</button>' + (nGroups ? '<button class="btn" data-act="prep-conv">Préparer les conventions (' + nGroups + ')</button>' : '') + '<button class="btn pri" data-act="word-pending"' + (nGen ? '' : ' disabled') + '>Générer les conventions à jour' + (nGen ? ' (' + nGen + ')' : '') + '</button>') +
-      dirBar() +
-      '<div class="bar"><input type="search" id="q-cv" placeholder="Rechercher un organisme, une référence…" value="' + esc(f.q) + '"><select id="f-st">' + opts(STATUTS.map(s => [s.k, s.l]), f.st, 'Tous les statuts') + '</select><select id="f-pc">' + perOpts(f.per, 'Toutes les périodes') + '</select></div>' +
+      dirBar() + '<div id="cvf">' + convFilterBar() + '</div>' +
       '<div class="bar sel" id="selbar"></div><div id="tbl"></div>';
   },
-  after() { $('#q-cv').oninput = e => { UI.f.conv.q = e.target.value; fillConvs(); }; $('#f-st').onchange = e => { UI.f.conv.st = e.target.value; fillConvs(); }; $('#f-pc').onchange = e => { UI.f.conv.per = e.target.value; fillConvs(); }; fillConvs(); }
+  after() { bindConvFilters(); fillConvs(); }
 };
+function bindConvFilters() {
+  let tm = null;
+  const reload = () => { UI.f.conv.lim = 150; const keep = document.activeElement && document.activeElement.id; $('#cvf').innerHTML = convFilterBar(); bindConvFilters(); fillConvs(); if (keep && $('#' + keep)) { const el = $('#' + keep); el.focus(); if (el.setSelectionRange && el.value) el.setSelectionRange(el.value.length, el.value.length); } };
+  $('#q-cv').oninput = e => { UI.f.conv.q = e.target.value; clearTimeout(tm); tm = setTimeout(() => { UI.f.conv.lim = 150; fillConvs(); }, 150); };
+  $('#q-el').oninput = e => { UI.f.conv.el = e.target.value; clearTimeout(tm); tm = setTimeout(() => { UI.f.conv.lim = 150; fillConvs(); }, 150); };
+  [['etab', 'fc-etab'], ['cl', 'fc-cl'], ['org', 'fc-org'], ['per', 'fc-per'], ['st', 'fc-st']].forEach(([k, id]) => { $('#' + id).onchange = e => { UI.f.conv[k] = e.target.value; if (k === 'etab') UI.f.conv.cl = ''; reload(); }; });
+}
 function selBarConv() {
   const n = UI.sel.conv.size;
   return n ? '<b>' + plural(n, 'convention sélectionnée') + '</b><button class="btn pri sm" data-act="word-sel">Générer les Word (fichier .zip)</button><button class="btn sm" data-act="status-sel">Changer le statut</button><button class="btn sm danger" data-act="del-conv">Supprimer</button><button class="lnk" data-act="clear-sel" data-k="conv">Tout désélectionner</button>' : '';
 }
 function fillConvs() {
   const rows = filteredConvs(), f = UI.f.conv, shown = rows.slice(0, f.lim), sel = UI.sel.conv;
-  $('#tbl').innerHTML = '<p class="count">' + plural(rows.length, 'convention') + '</p>' + table(CONV_COLS, convRows(shown, 'conv'), { empty: S.conventions.length ? 'Aucune convention ne correspond aux filtres.' : emptyState('Aucune convention pour l’instant', 'Les conventions se préparent toutes seules dès qu’un élève de la liste a un organisme d’accueil et une période.', '<button class="btn pri" data-act="nav" data-v="eleves">Aller aux élèves</button>') }) + more(rows.length, shown.length, 'conv');
+  const nEl = rows.reduce((a, c) => a + elevesOf(c.id).length, 0);
+  $('#tbl').innerHTML = '<p class="count">' + plural(rows.length, 'convention') + (rows.length !== S.conventions.length ? ' sur ' + S.conventions.length : '') + ' · ' + plural(nEl, 'stagiaire') + '</p>' + table(CONV_COLS, convRows(shown, 'conv'), { empty: S.conventions.length ? 'Aucune convention ne correspond aux filtres.' : emptyState('Aucune convention pour l’instant', 'Les conventions se préparent toutes seules dès qu’un élève de la liste a un organisme d’accueil et une période.', '<button class="btn pri" data-act="nav" data-v="eleves">Aller aux élèves</button>') }) + more(rows.length, shown.length, 'conv');
   const all = $('#all-cv'); if (all) { all.checked = shown.length > 0 && shown.every(c => sel.has(c.id)); all.onchange = () => { shown.forEach(c => all.checked ? sel.add(c.id) : sel.delete(c.id)); fillConvs(); }; }
   $('#selbar').innerHTML = selBarConv(); $('#selbar').style.display = sel.size ? 'flex' : 'none';
 }
@@ -1342,7 +1409,7 @@ VIEWS.aide = {
       '<section class="card"><h2>Le parcours en 3 étapes</h2><ol class="help">' +
       '<li><b>Organismes</b> : le répertoire des organismes d’accueil (dénomination, adresse, domaine, téléphone, représentant), repris sur chaque convention. Saisie à la main, import Excel avec aperçu, ou import de plusieurs documents Word à la fois.</li>' +
       '<li><b>Élèves</b> : la liste de chaque établissement, avec l’organisme d’accueil de chaque élève. <b>Cette liste fait foi.</b> Import Excel, ou « Saisie rapide » : collez une liste reçue par Word ou notée au téléphone. Un nom d’organisme mal écrit est rapproché du répertoire ; un organisme absent peut y être ajouté en un clic.</li>' +
-      '<li><b>Conventions</b> : elles se préparent toutes seules, une par organisme et par période, dès qu’un élève a un organisme et une période. « Générer les conventions à jour » produit en un clic tous les fichiers Word (dossier .zip). Une convention modifiée après coup est signalée « à régénérer ».</li></ol></section>' +
+      '<li><b>Conventions</b> : elles se préparent toutes seules, une par établissement, par organisme et par période, dès qu’un élève a un organisme et une période. Des filtres permettent de les retrouver par établissement, classe, élève, organisme, période ou statut. « Générer les conventions à jour » produit en un clic tous les fichiers Word (dossier .zip). Une convention modifiée après coup est signalée « à régénérer ».</li></ol></section>' +
       '<section class="card"><h2>Ensuite</h2><ul class="help"><li><b>Suivi des signatures</b> : notez chaque étape du circuit papier. Les retards apparaissent à relancer.</li><li><b>Bilans</b> : le modèle standard se remplit tout seul ; exportez en Word ou Excel.</li><li><b>Historique</b> : chaque action est notée avec la date et l’agent. Un import ou un changement d’organisme se défait en un clic.</li></ul></section>' +
       '<section class="card"><h2>Bon à savoir</h2><ul class="help"><li>Un élève sans organisme, avec un organisme inconnu ou sans période n’a pas encore de convention : le filtre « À compléter » de la page Élèves les rassemble.</li><li>Vos données restent sur cet ordinateur. Rien n’est envoyé sur Internet. Faites des sauvegardes (menu Données).</li><li>Un élève dont la convention est imprimée ou signée ne peut plus être déplacé : changez d’abord le statut de la convention.</li></ul></section>';
   }
@@ -1882,7 +1949,7 @@ function eleveForm(e) {
     body: '<div class="fgrid">' + field('Nom et prénoms', 'nom', e.nom, { req: true, wide: true }) + field('Établissement d’origine', 'etabId', e.etabId, { type: 'select', req: true, options: etabOpts(e.etabId, '— choisir —') }) +
       field('Classe / filière', 'classe', e.classe, { list: 'dl-cl', hint: 'Choisissez dans la liste pour retrouver la période automatiquement.' }) + '<datalist id="dl-cl"></datalist>' +
       field('Période de stage', 'periodeId', e.periodeId, { type: 'select', options: perOpts(e.periodeId, '— à définir —') }) +
-      field('Organisme d’accueil', 'organismeId', e.organismeId, { type: 'select', options: orgOpts(e.organismeId, e.orgTxt ? '— inconnu du répertoire : « ' + e.orgTxt + ' » —' : '— à indiquer —'), hint: lock ? 'Convention imprimée ou signée : organisme et période verrouillés.' : 'Avec un organisme et une période, la convention est préparée automatiquement.' }) +
+      field('Organisme d’accueil', 'organismeId', e.organismeId, { type: 'select', options: orgOpts(e.organismeId, e.orgTxt ? '— inconnu du répertoire : « ' + e.orgTxt + ' » —' : '— à indiquer —'), hint: lock ? 'Convention imprimée ou signée : établissement, organisme et période verrouillés.' : 'Avec un organisme et une période, la convention est préparée automatiquement.' }) +
       field('Notes', 'notes', e.notes, { type: 'textarea', wide: true, rows: 2 }) + '</div>' +
       (nu ? '' : '<div class="acts left"><button type="button" class="btn sm danger" data-act="del-1-eleve" data-id="' + e.id + '">Supprimer cet élève</button></div>'),
     onOpen(md) {
@@ -1890,15 +1957,15 @@ function eleveForm(e) {
       const fillDl = () => { dl.innerHTML = S.classes.filter(c => c.etab === eCode(sel.value)).map(c => '<option value="' + esc((c.niveau + ' ' + c.classe).trim()) + '">').join(''); };
       sel.onchange = fillDl; fillDl();
       f.classe.onchange = f.classe.oninput = () => { const c = classMatch(sel.value, f.classe.value); if (c && P(c.periode) && (!f.periodeId.value || nu)) f.periodeId.value = c.periode; };
-      if (lock) { f.organismeId.disabled = true; f.periodeId.disabled = true; }
+      if (lock) { f.organismeId.disabled = true; f.periodeId.disabled = true; f.etabId.disabled = true; }
     },
     onOk(fd) {
       const nom = cleanName(fd.nom); if (!nom) { toast('Le nom est obligatoire.', 'err'); return false; }
       const org = lock ? e.organismeId : (fd.organismeId || ''), per = lock ? e.periodeId : (fd.periodeId || '');
       const rec = nu ? { id: uid('e'), conventionId: '', organismeId: '', orgTxt: '', ordre: nextOrdre() } : e;
-      const perChanged = !nu && per !== e.periodeId;
+      const perChanged = !nu && (per !== e.periodeId || (!lock && fd.etabId !== e.etabId));
       if (perChanged) detachConv(rec);
-      Object.assign(rec, { nom, etabId: fd.etabId, classe: fd.classe.trim(), periodeId: per, notes: fd.notes });
+      Object.assign(rec, { nom, etabId: lock ? e.etabId : fd.etabId, classe: fd.classe.trim(), periodeId: per, notes: fd.notes });
       if (nu) S.eleves.push(rec);
       if (org !== (rec.organismeId || '')) affecter([{ e: rec, org }], { action: 'Organisme d’accueil modifié', detail: n => org ? plural(n, 'élève') + ' → ' + oName(org) : plural(n, 'organisme retiré') });
       else if (perChanged || nu) syncConvs([rec]);
@@ -2016,28 +2083,22 @@ function mergeModal() {
 /* ---------- Conventions : préparation ---------- */
 function pendingGroups() {
   const m = new Map();
-  S.eleves.filter(e => e.organismeId && e.periodeId && !e.conventionId).forEach(e => { const k = e.organismeId + '|' + e.periodeId; if (!m.has(k)) m.set(k, { org: e.organismeId, per: e.periodeId, els: [] }); m.get(k).els.push(e); });
-  return Array.from(m.values()).sort((a, b) => collator.compare(oName(a.org), oName(b.org)) || (P(a.per).debut || '').localeCompare(P(b.per).debut || ''));
+  S.eleves.filter(e => e.organismeId && e.periodeId && !e.conventionId).forEach(e => { const k = (e.etabId || '') + '|' + e.organismeId + '|' + e.periodeId; if (!m.has(k)) m.set(k, { etab: e.etabId || '', org: e.organismeId, per: e.periodeId, els: [] }); m.get(k).els.push(e); });
+  return Array.from(m.values()).sort((a, b) => collator.compare(eCode(a.etab), eCode(b.etab)) || collator.compare(oName(a.org), oName(b.org)) || (P(a.per).debut || '').localeCompare(P(b.per).debut || ''));
 }
 function prepConv() {
   const gr = pendingGroups(), noPer = S.eleves.filter(e => e.organismeId && !e.periodeId && !e.conventionId).length;
   if (!gr.length) { modal({ title: 'Préparer les conventions', ok: false, cancel: 'Fermer', body: '<p class="msg">Aucun élève en attente de convention.</p><p class="hint">Pour préparer une convention, un élève doit avoir un <b>organisme d’accueil</b> et une <b>période de stage</b>, et ne pas figurer déjà dans une convention.' + (noPer ? '<br><b>' + plural(noPer, 'élève') + '</b> ont un organisme mais pas de période.' : '') + '</p>' }); return; }
   const line = (x, i) => {
-    const ex = S.conventions.find(c => c.organismeId === x.org && c.periodeId === x.per && ['a_generer', 'generee'].includes(convStatut(c).k));
-    return '<label class="grp"><input type="checkbox" name="g' + i + '" checked><span><b>' + esc(oName(x.org)) + '</b> — ' + esc(pName(x.per)) + '<br><small class="muted">' + plural(x.els.length, 'stagiaire') + (ex ? ' · ajoutés à la convention existante ' + esc(ex.ref) : ' · nouvelle convention') + '</small></span></label>';
+    const ex = S.conventions.find(c => sameConv(c, { etabId: x.etab, organismeId: x.org, periodeId: x.per }) && convOpen(c));
+    return '<label class="grp"><input type="checkbox" name="g' + i + '" checked><span><b>' + esc(eCode(x.etab) || '?') + ' · ' + esc(oName(x.org)) + '</b> — ' + esc(pName(x.per)) + '<br><small class="muted">' + plural(x.els.length, 'stagiaire') + (ex ? ' · ajoutés à la convention existante ' + esc(ex.ref) : ' · nouvelle convention') + '</small></span></label>';
   };
   modal({
     title: 'Préparer les conventions', ok: 'Créer les conventions sélectionnées', wide: true,
-    body: '<p class="hint">Une convention par organisme et par période. Décochez celles que vous ne souhaitez pas créer maintenant.</p><div class="grps">' + gr.map(line).join('') + '</div>' + (noPer ? '<p class="hint warn">' + plural(noPer, 'élève') + ' affecté(s) mais sans période : non inclus.</p>' : ''),
+    body: '<p class="hint">Une convention par établissement, par organisme et par période. Décochez celles que vous ne souhaitez pas créer maintenant.</p><div class="grps">' + gr.map(line).join('') + '</div>' + (noPer ? '<p class="hint warn">' + plural(noPer, 'élève') + ' affecté(s) mais sans période : non inclus.</p>' : ''),
     onOk(fd) {
       let created = 0, added = 0;
-      gr.forEach((x, i) => {
-        if (!fd['g' + i]) return;
-        let c = S.conventions.find(c => c.organismeId === x.org && c.periodeId === x.per && ['a_generer', 'generee'].includes(convStatut(c).k));
-        if (!c) { const p = P(x.per); c = { id: uid('cv'), ref: nextRef(), organismeId: x.org, periodeId: x.per, debut: p.debut, fin: p.fin, semaines: p.semaines, rep: '', qualite: '', notes: '', cree: todayISO(), hist: [{ k: 'a_generer', d: todayISO() }] }; S.conventions.push(c); created++; }
-        else if (convStatut(c).k === 'generee') c.aRegenerer = true;
-        x.els.forEach(e => { e.conventionId = c.id; added++; });
-      });
+      gr.forEach((x, i) => { if (!fd['g' + i]) return; const r = syncConvs(x.els); created += r.created; added += r.added; });
       logAct('Préparation des conventions', plural(created, 'convention créée') + ', ' + plural(added, 'stagiaire') + ' rattaché(s)');
       save(); render(); toast(plural(created, 'convention créée') + ', ' + plural(added, 'stagiaire') + ' rattaché(s).', 'ok');
     }
@@ -2049,6 +2110,7 @@ function openConv(id) {
     title: 'Convention ' + c.ref, wide: true, ok: 'Enregistrer',
     extra: '<button type="button" class="btn" data-act="word-conv" data-id="' + c.id + '">Générer le Word</button><button type="button" class="btn" data-act="status-one" data-id="' + c.id + '">Changer le statut</button>',
     body: (w.length ? '<ul class="alerts mini">' + w.map(x => '<li class="warn"><span>' + esc(x) + '</span></li>').join('') + '</ul>' : '') +
+      '<p class="hint">Établissement : <b>' + esc(c.etabId ? eCode(c.etabId) + ' — ' + eName(c.etabId) : (c.multiEtab ? 'plusieurs établissements (convention antérieure à la version 4)' : '—')) + '</b></p>' +
       '<div class="fgrid">' + field('Organisme', 'organismeId', c.organismeId, { type: 'select', options: orgOpts(c.organismeId), wide: true }) + field('Période', 'periodeId', c.periodeId, { type: 'select', options: perOpts(c.periodeId), wide: true }) +
       field('Début du stage', 'debut', c.debut, { type: 'date' }) + field('Fin du stage', 'fin', c.fin, { type: 'date' }) + field('Durée en semaines', 'semaines', c.semaines, { type: 'number', min: 1, step: '0.5', hint: 'Durée calculée sur les dates : ' + (weeksBetween(c.debut, c.fin) || '?') + ' sem.' }) +
       field('Représentant de l’organisme (facultatif, sinon laissé en pointillés)', 'rep', c.rep || (O(c.organismeId) || {}).representant || '', { wide: true }) + field('Qualité (facultatif)', 'qualite', c.qualite || (O(c.organismeId) || {}).qualite || '', { wide: true }) + field('Notes', 'notes', c.notes, { type: 'textarea', wide: true, rows: 2 }) + '</div>' +
@@ -2057,6 +2119,7 @@ function openConv(id) {
     onOk(fd) {
       const old = JSON.stringify([c.organismeId, c.periodeId, c.debut, c.fin, c.semaines, c.rep, c.qualite]);
       if (fd.organismeId !== c.organismeId) elevesOf(c.id).forEach(e => { e.organismeId = fd.organismeId; });
+      if (fd.periodeId !== c.periodeId) elevesOf(c.id).forEach(e => { e.periodeId = fd.periodeId; });
       const o = O(fd.organismeId) || {};
       Object.assign(c, { organismeId: fd.organismeId, periodeId: fd.periodeId, debut: fd.debut, fin: fd.fin, semaines: fd.semaines ? +fd.semaines : null, rep: fd.rep === (o.representant || '') ? '' : fd.rep, qualite: fd.qualite === (o.qualite || '') ? '' : fd.qualite, notes: fd.notes });
       if (old !== JSON.stringify([c.organismeId, c.periodeId, c.debut, c.fin, c.semaines, c.rep, c.qualite]) && convStatut(c).k !== 'a_generer') c.aRegenerer = true;
@@ -2080,7 +2143,7 @@ async function convDocx(c) {
   });
 }
 function markGenerated(c) { if (convStatut(c).k === 'a_generer') { c.hist.push({ k: 'generee', d: todayISO() }); } c.aRegenerer = false; }
-const convFile = c => safeName(c.ref + '_' + oName(c.organismeId) + '_' + pName(c.periodeId));
+const convFile = c => safeName(c.ref + '_' + (eCode(c.etabId) ? eCode(c.etabId) + '_' : '') + oName(c.organismeId) + '_' + pName(c.periodeId));
 /* ---------- Dossier d'enregistrement des conventions ----------
    Chrome et Edge permettent d'écrire directement dans un dossier choisi par l'utilisateur. Le choix est mémorisé
    dans ce navigateur (un dossier pour les vraies données, un pour l'entraînement) ; l'accès est redemandé à chaque
@@ -2151,7 +2214,7 @@ async function wordMany(ids) {
 }
 
 /* ---------- Exports ---------- */
-const convAoa = list => [['Réf.', 'Organisme', 'Période', 'Stagiaires', 'Début', 'Fin', 'Semaines', 'Statut', 'Depuis le', 'Jours', 'Contrôles']].concat(list.map(c => { const h = convStatut(c); return [c.ref, oName(c.organismeId), pName(c.periodeId), elevesOf(c.id).length, fdate(c.debut), fdate(c.fin), c.semaines || '', ST[h.k].l, fdate(h.d), convJours(c), convWarn(c).join(' | ')]; }));
+const convAoa = list => [['Réf.', 'Établissement', 'Classes', 'Organisme', 'Période', 'Stagiaires', 'Élèves', 'Début', 'Fin', 'Semaines', 'Statut', 'Depuis le', 'Jours', 'Contrôles']].concat(list.map(c => { const h = convStatut(c), els = elevesOf(c.id).sort(byName); return [c.ref, c.etabId ? eName(c.etabId) : (c.multiEtab ? 'plusieurs' : ''), Array.from(new Set(els.map(e => e.classe).filter(Boolean))).join(' ; '), oName(c.organismeId), pName(c.periodeId), els.length, els.map(e => e.nom).join(' ; '), fdate(c.debut), fdate(c.fin), c.semaines || '', ST[h.k].l, fdate(h.d), convJours(c), convWarn(c).join(' | ')]; }));
 async function bilanDocx() {
   const b = computeBilan(UI.bilan);
   try { const bytes = await DocGen.buildBilan(JSZip, b); saveBlob(new Blob([bytes], { type: DOCX_MIME }), 'Bilan_PFMP_' + S.settings.annee + '_' + todayISO() + '.docx'); toast('Bilan généré (Word).', 'ok'); } catch (e) { console.error(e); toast('Génération impossible : ' + e.message, 'err'); }
@@ -2235,7 +2298,8 @@ const ACT = {
   'rm-from-conv'(a) { const e = S.eleves.find(x => x.id === a.dataset.id), c = C(a.dataset.cid); if (e) { e.conventionId = ''; if (c && convStatut(c).k !== 'a_generer') c.aRegenerer = true; } save(); document.querySelectorAll('.modal-bg').forEach(m => m.remove()); render(); openConv(a.dataset.cid); },
   'exp-conv'() { xlsxDownload('Conventions_' + todayISO() + '.xlsx', [{ name: 'Conventions', aoa: convAoa(filteredConvs()) }]); },
   'exp-relance'() { xlsxDownload('Conventions_a_relancer_' + todayISO() + '.xlsx', [{ name: 'À relancer', aoa: convAoa(S.conventions.filter(convRelance)) }]); },
-  'goto-st'(a) { UI.f.conv.st = a.dataset.k; UI.f.conv.q = ''; UI.f.conv.per = ''; go('conventions'); },
+  'goto-st'(a) { Object.assign(UI.f.conv, CONV_F0, { st: a.dataset.k }); go('conventions'); },
+  'conv-reset'() { Object.assign(UI.f.conv, CONV_F0, { lim: 150 }); render(); },
   'bil-docx'() { bilanDocx(); }, 'bil-xlsx'() { bilanXlsx(); }, 'bil-print'() { window.print(); },
   'ref-tab'(a) { UI.f.ref.tab = a.dataset.k; render(); },
   'add-per'() { perForm(); }, 'edit-per'(a) { perForm(P(a.dataset.id)); },
@@ -2271,6 +2335,18 @@ function boot() {
   loadState(); saveNow();
   const v = location.hash.slice(1); if (VIEWS[v]) UI.view = v;
   render(); loadDir();
+  if (UPGRADE) {
+    const u = UPGRADE; UPGRADE = null;
+    logAct('Mise à jour vers la version 4', 'conventions par établissement : ' + u.avant + ' → ' + S.conventions.length + ' conventions');
+    saveNow(); render();
+    modal({ title: 'Nouvelle version de l’application', ok: 'Compris', cancel: 'Fermer',
+      body: '<p class="msg">Vos données ont été <b>conservées</b> : ' + plural(u.eleves, 'élève') + ', ' + plural(S.organismes.length, 'organisme') + ' et toutes vos conventions.</p>' +
+        '<ul class="help"><li>Les conventions sont maintenant établies <b>par établissement</b> (et par organisme et période). Celles qui regroupaient plusieurs établissements ont été séparées : ' + u.avant + ' conventions avant, ' + S.conventions.length + ' maintenant.</li>' +
+        '<li>Une convention déjà générée et modifiée par ce changement est signalée « à régénérer ». Une convention déjà imprimée ou signée n’a pas été touchée.</li>' +
+        '<li>La page Conventions a des filtres : établissement, classe, élève, organisme, période, statut.</li></ul>' +
+        '<p class="hint">Une copie de sécurité des données d’avant la mise à jour est gardée dans ce navigateur. Par prudence, téléchargez aussi une sauvegarde :</p>' +
+        '<div class="acts left"><button type="button" class="btn pri" data-act="backup">Télécharger une sauvegarde maintenant</button></div>' });
+  }
 }
 
 boot();</script>
