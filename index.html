@@ -604,7 +604,7 @@ var o=[];var l=Array.isArray(e);for(f=n.s.c;f<=n.e.c;++f)s[f]=ya(f);for(var c=n.
 </script>
 <script>/* ===== Gestionnaire PFMP — noyau : état, utilitaires, calculs ===== */
 'use strict';
-const APP_VERSION = '4.0';
+const APP_VERSION = '4.1';
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -1093,7 +1093,9 @@ function shell() {
   const n = { eleves: S.eleves.length, organismes: S.organismes.filter(o => o.actif !== false).length, conventions: toGen || S.conventions.filter(c => convStatut(c).k !== 'annulee').length, suivi: S.conventions.filter(convRelance).length || null };
   const hot = { conventions: toGen ? 'hot' : '', suivi: 'warn' };
   $('#nav').innerHTML = NAV.map(([k, l, step]) => (NAV_GROUPS[k] ? '<div class="ng">' + NAV_GROUPS[k] + '</div>' : '') + '<a href="#' + k + '" class="' + (UI.view === k ? 'on' : '') + (step ? ' step' : '') + '" data-act="nav" data-v="' + k + '"' + (UI.view === k ? ' aria-current="page"' : '') + '>' + (step ? '<i class="sn">' + step + '</i>' : '') + '<span class="nl2">' + esc(l) + '</span>' + (n[k] != null ? '<span class="cnt ' + (hot[k] || '') + '"' + (k === 'conventions' && toGen ? ' title="Conventions à générer en Word"' : '') + '>' + n[k] + '</span>' : '') + '</a>').join('');
-  $('#banner').innerHTML = MODE === 'demo' ? '<div class="bn demo">MODE ENTRAÎNEMENT — données fictives, rien de ce que vous faites ici n’affecte vos vraies données. <button class="btn sm" data-act="mode" data-m="real">Retourner à mes vraies données</button></div>' :
+  const bkMsg = typeof FS_OK !== 'undefined' && FS_OK && MODE === 'real' ? (BK ? (BK_STATE === 'permission' ? '<div class="bn warn">La sauvegarde automatique du jour attend votre autorisation (dossier « ' + esc(BK.name) + ' »). <button class="btn sm pri" data-act="bk-now">Sauvegarder maintenant</button></div>' : BK_STATE === 'erreur' ? '<div class="bn warn">La sauvegarde automatique du jour a échoué. <button class="btn sm" data-act="bk-now">Réessayer</button></div>' : '') :
+    (S.eleves.length ? '<div class="bn warn">Aucun dossier de sauvegarde automatique choisi. <button class="btn sm pri" data-act="bk-choose">Choisir le dossier</button></div>' : '')) : null;
+  $('#banner').innerHTML = MODE === 'demo' ? '<div class="bn demo">MODE ENTRAÎNEMENT — données fictives, rien de ce que vous faites ici n’affecte vos vraies données. <button class="btn sm" data-act="mode" data-m="real">Retourner à mes vraies données</button></div>' : bkMsg !== null ? bkMsg :
     (S.lastBackup ? ((daysBetween(S.lastBackup.slice(0, 10), todayISO()) >= 7 && S.eleves.length) ? '<div class="bn warn">Dernière sauvegarde il y a plus de 7 jours. <button class="btn sm" data-act="backup">Sauvegarder maintenant</button></div>' : '') : (S.eleves.length > 5 ? '<div class="bn warn">Aucune sauvegarde faite pour l’instant. <button class="btn sm" data-act="backup">Sauvegarder maintenant</button></div>' : ''));
 }
 function render() {
@@ -1390,8 +1392,9 @@ VIEWS.donnees = {
   html() {
     const s = S.settings;
     return pageHead('Données et paramètres', 'Sauvegardes, paramètres du service et mode entraînement.') +
+      '<section class="card"><h2>Sauvegarde automatique quotidienne</h2>' + bkBar() + '</section>' +
       '<section class="card"><h2>Dossier des conventions</h2>' + dirBar(true) + '</section>' +
-      '<div class="cols"><section class="card"><h2>Sauvegarde</h2><p class="muted">Les données sont enregistrées automatiquement dans ce navigateur (sur cet ordinateur). Faites aussi une sauvegarde dans un fichier régulièrement et copiez-la sur une clé USB ou dans le cloud.</p>' +
+      '<div class="cols"><section class="card"><h2>Sauvegarde</h2><p class="muted">Les données sont enregistrées automatiquement dans ce navigateur (sur cet ordinateur). En plus de la sauvegarde automatique, vous pouvez télécharger une sauvegarde à tout moment. Pour revenir à une sauvegarde (automatique ou non), utilisez « Restaurer depuis un fichier ».</p>' +
       '<p>Dernière sauvegarde : <b>' + (S.lastBackup ? fdate(S.lastBackup.slice(0, 10)) : 'jamais') + '</b></p><div class="acts left"><button class="btn pri" data-act="backup">Sauvegarder dans un fichier</button><button class="btn" data-act="restore">Restaurer depuis un fichier</button></div><input type="file" id="f-restore" accept=".json" hidden></section>' +
       '<section class="card"><h2>Paramètres</h2><form id="set" class="fgrid">' + field('Année scolaire', 'annee', s.annee, { req: true }) + field('Relancer après (jours)', 'relance', s.relanceJours, { type: 'number', min: 1 }) +
       field('Nom de l’agent (inscrit dans l’historique)', 'agent', s.agent || '', { wide: true, ph: 'Prénom et nom' }) + field('Signataire DGFP', 'dgnom', s.dgfp.nom, { wide: true, hint: 'Nom imprimé en bas de chaque convention est celui du modèle Word ; à modifier dans le modèle si le signataire change.' }) +
@@ -2178,6 +2181,60 @@ async function dirReady() {
   toast('Accès au dossier « ' + DIR.name + ' » non accordé : les conventions sont téléchargées à la place.', 'err');
   return null;
 }
+/* ---------- Sauvegarde automatique quotidienne ----------
+   L'utilisateur choisit un dossier de son ordinateur (idéalement synchronisé : OneDrive, clé USB…). Chaque jour, à la première
+   ouverture, l'application y dépose une copie complète des vraies données (Sauvegarde_PFMP_AAAA-MM-JJ.json), restaurable depuis
+   « Données et paramètres ». Les 30 dernières sont gardées. Le mode entraînement n'est jamais sauvegardé. */
+let BK = null, BK_STATE = '';
+const BK_KEY = 'dossierSauvegardes_real', BK_KEEP = 30, BK_RE = /^Sauvegarde_PFMP_\d{4}-\d{2}-\d{2}\.json$/;
+async function loadBk() { if (!FS_OK) return; BK = (await kvStore('readonly', st => st.get(BK_KEY))) || null; await autoBackup(false); if (!BK && MODE === 'real') askBkFolder(); }
+async function chooseBk() {
+  try {
+    const h = await window.showDirectoryPicker({ id: 'pfmp-sauvegardes', mode: 'readwrite', startIn: 'documents' });
+    BK = h; await kvStore('readwrite', st => st.put(h, BK_KEY));
+    logAct('Dossier de sauvegarde automatique choisi', h.name); save();
+    await autoBackup(true, true);
+  } catch (e) { if (e.name !== 'AbortError') toast('Choix du dossier impossible : ' + e.message, 'err'); }
+}
+async function forgetBk() { BK = null; BK_STATE = ''; await kvStore('readwrite', st => st.delete(BK_KEY)); logAct('Sauvegarde automatique désactivée', ''); save(); render(); toast('Sauvegarde automatique désactivée.', 'ok'); }
+/* interactive : appelée après un clic (le navigateur peut alors demander l'autorisation) ; force : même si celle du jour est faite. */
+async function autoBackup(interactive, force) {
+  if (!FS_OK || MODE !== 'real' || !BK || !S) return false;
+  if (!force && S.autoBk === todayISO()) { BK_STATE = 'ok'; return false; }
+  let perm = 'denied';
+  try { const o = { mode: 'readwrite' }; perm = await BK.queryPermission(o); if (perm !== 'granted' && interactive) perm = await BK.requestPermission(o); } catch (e) { }
+  if (perm !== 'granted') { BK_STATE = 'permission'; shell(); if (interactive) toast('Accès au dossier « ' + BK.name + ' » refusé : la sauvegarde n’a pas été faite.', 'err'); return false; }
+  try {
+    const when = new Date().toISOString(), name = 'Sauvegarde_PFMP_' + todayISO() + '.json';
+    S.autoBk = todayISO(); S.lastBackup = when;
+    await writeToDir(BK, name, JSON.stringify({ app: 'gestionnaire-pfmp', version: APP_VERSION, mode: MODE, exportedAt: when, auto: true, data: S }));
+    const old = []; for await (const [n, h] of BK.entries()) if (h.kind === 'file' && BK_RE.test(n)) old.push(n);
+    old.sort().slice(0, Math.max(0, old.length - BK_KEEP)).forEach(n => BK.removeEntry(n).catch(() => { }));
+    BK_STATE = 'ok'; saveNow(); shell();
+    if (UI.view === 'donnees') render();
+    toast('Sauvegarde du jour enregistrée dans le dossier « ' + BK.name + ' ».', 'ok');
+    return true;
+  } catch (e) { console.error(e); S.autoBk = ''; BK_STATE = 'erreur'; shell(); toast('Sauvegarde automatique impossible : ' + e.message, 'err'); return false; }
+}
+/* À l'ouverture : demander le dossier tant qu'aucun n'est choisi (une fois par ouverture, après les autres messages). */
+let BK_ASKED = false;
+function askBkFolder() {
+  if (BK_ASKED || BK || MODE !== 'real' || !FS_OK) return;
+  if ($('.modal-bg')) { setTimeout(askBkFolder, 800); return; }
+  BK_ASKED = true;
+  modal({ title: 'Sauvegarde automatique de vos données', ok: false, cancel: 'Plus tard',
+    body: '<p class="msg">Vos données sont enregistrées dans ce navigateur. Pour ne jamais les perdre (panne, nettoyage du navigateur, changement d’ordinateur), l’application peut en déposer <b>chaque jour une copie</b> dans un dossier de votre ordinateur.</p>' +
+      '<p class="hint">Choisissez de préférence un dossier synchronisé (OneDrive, Google Drive) ou une clé USB. Les 30 dernières sauvegardes y sont gardées ; elles se restaurent depuis « Données et paramètres ».</p>' +
+      '<div class="acts left"><button type="button" class="btn pri" data-act="bk-choose" data-close>Choisir le dossier de sauvegarde</button></div>' });
+}
+function bkBar() {
+  if (!FS_OK) return '<p class="muted">La sauvegarde automatique dans un dossier fonctionne avec Chrome ou Microsoft Edge. Ici, utilisez « Sauvegarder dans un fichier » régulièrement.</p>';
+  if (!BK) return '<div class="bn warn dirbar"><span>Aucun dossier de sauvegarde automatique. Choisissez-en un : une copie de vos données y sera déposée chaque jour.</span><span class="acts"><button class="btn sm pri" data-act="bk-choose">Choisir le dossier</button></span></div>';
+  return '<div class="bn ' + (BK_STATE === 'ok' ? 'info' : 'warn') + ' dirbar"><span>Sauvegarde automatique quotidienne dans le dossier <b>« ' + esc(BK.name) + ' »</b>. ' +
+    (S.autoBk ? 'Dernière : <b>' + fdate(S.autoBk) + '</b>.' : 'Aucune encore.') + (BK_STATE === 'permission' ? ' <b>Le navigateur attend votre autorisation pour la sauvegarde du jour.</b>' : '') + '</span>' +
+    '<span class="acts"><button class="btn sm' + (BK_STATE === 'ok' ? '' : ' pri') + '" data-act="bk-now">Sauvegarder maintenant</button><button class="btn sm" data-act="bk-choose">Changer de dossier</button><button class="lnk" data-act="bk-forget">Désactiver</button></span></div>';
+}
+
 async function writeToDir(dir, name, bytes) { const fh = await dir.getFileHandle(name, { create: true }); const w = await fh.createWritable(); await w.write(bytes); await w.close(); }
 function dirBar(card) {
   if (!FS_OK) return card ? '<p class="muted">L’enregistrement direct dans un dossier fonctionne avec Chrome ou Microsoft Edge. Ici, les conventions sont téléchargées dans le dossier Téléchargements.</p>' : '';
@@ -2244,7 +2301,7 @@ function restore(file) {
 }
 function setMode(m) {
   MODE = m; try { localStorage.setItem('pfmp_mode', m); } catch (e) { }
-  loadState(); saveNow(); DIR = null; go('accueil'); loadDir(); toast(m === 'demo' ? 'Mode entraînement : données fictives chargées.' : 'Vos vraies données sont de retour.', 'ok');
+  loadState(); saveNow(); DIR = null; go('accueil'); loadDir(); BK_STATE = ''; autoBackup(false); toast(m === 'demo' ? 'Mode entraînement : données fictives chargées.' : 'Vos vraies données sont de retour.', 'ok');
 }
 
 /* ---------- Événements ---------- */
@@ -2284,6 +2341,7 @@ const ACT = {
   undo(a) { const r = annuler(a.dataset.id); save(); render(); toast(r.ok ? 'Action annulée : ' + plural(r.done, 'élément rétabli') + (r.skip ? ' (' + r.skip + ' laissé(s) tel(s) quel(s))' : '') + '.' : r.msg, r.ok ? 'ok' : 'err'); },
   'merge-org'() { mergeModal(); },
   'dir-choose'() { chooseDir(); }, 'dir-forget'() { forgetDir(); },
+  'bk-choose'() { chooseBk(); }, 'bk-forget'() { forgetBk(); }, 'bk-now'() { autoBackup(true, true); },
   'word-pending'() { wordMany(S.conventions.filter(c => elevesOf(c.id).length && (convStatut(c).k === 'a_generer' || c.aRegenerer)).map(c => c.id)); },
   'dl-report'() { if (!LAST_REPORT.length) return; xlsxDownload('Rapport_import_' + todayISO() + '.xlsx', [{ name: 'Rapport', aoa: [['Ligne', 'Colonne', 'Valeur', 'Niveau', 'Problème']].concat(LAST_REPORT.map(x => [x.ligne, x.col, x.val, x.niv === 'err' ? 'erreur' : x.niv === 'warn' ? 'à vérifier' : 'information', x.msg])) }]); },
   'del-eleves'() { const n = UI.sel.eleves.size; confirmBox('Supprimer ' + plural(n, 'élève') + ' ?\nCette action est définitive (pensez à sauvegarder).', () => { delElevesIds(Array.from(UI.sel.eleves)); save(); render(); toast(plural(n, 'élève supprimé') + '.', 'ok'); }, 'Supprimer', true); },
@@ -2334,7 +2392,9 @@ window.addEventListener('hashchange', () => { const v = location.hash.slice(1); 
 function boot() {
   loadState(); saveNow();
   const v = location.hash.slice(1); if (VIEWS[v]) UI.view = v;
-  render(); loadDir();
+  render(); loadDir(); loadBk();
+  /* Ouverture laissée plusieurs jours : la sauvegarde du nouveau jour se fait aussi (vérification toutes les heures). */
+  setInterval(() => autoBackup(false), 60 * 60 * 1000);
   if (UPGRADE) {
     const u = UPGRADE; UPGRADE = null;
     logAct('Mise à jour vers la version 4', 'conventions par établissement : ' + u.avant + ' → ' + S.conventions.length + ' conventions');
